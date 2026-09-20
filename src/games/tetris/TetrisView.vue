@@ -2,12 +2,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useTetris } from './useTetris'
 import PiecePreview from './PiecePreview.vue'
+import JevPanel from './JevPanel.vue'
 import StatTile from '@/components/StatTile.vue'
 import { useScoreStore } from '@/stores/scores'
 import { sfx } from '@/utils/sfx'
 
 const store = useScoreStore()
-const { canvas, state, restart, togglePause, move, rotate, softDrop, hardDrop, hold } =
+const { canvas, state, ai, restart, togglePause, toggleAi, saveApiKey, move, rotate, softDrop, hardDrop, hold } =
   useTetris({
     onGameOver: (score, lines) => {
       store.submit('tetris', score, { lines })
@@ -26,6 +27,17 @@ onMounted(() => {
 })
 
 const overlay = computed(() => {
+  if (ai.enabled) {
+    if (state.phase === 'over') {
+      return {
+        title: '💥 本局结束',
+        desc: `本局 ${state.score.toLocaleString('zh-CN')} 分 · 消除 ${state.lines} 行 · Jev 即将自动重开`,
+        cta: '立即重开',
+        action: restart,
+      }
+    }
+    return null
+  }
   if (state.phase === 'ready') {
     return { title: '准备好了吗？', desc: '消除每一行，别让方块堆到顶', cta: '开始游戏', action: restart }
   }
@@ -92,10 +104,17 @@ const downRepeat = repeat(() => softDrop())
           </p>
         </div>
         <div class="game-head__actions">
+          <button class="btn btn-ai" :class="{ 'is-on': ai.enabled }" @click="toggleAi">
+            ⚡ {{ ai.enabled ? '外挂运行中' : 'JEV 外挂' }}
+          </button>
           <button class="btn btn-ghost btn-icon" :title="soundOn ? '关闭音效' : '开启音效'" @click="soundOn = !soundOn">
             {{ soundOn ? '🔊' : '🔇' }}
           </button>
-          <button class="btn btn-ghost" @click="togglePause" :disabled="state.phase === 'ready' || state.phase === 'over'">
+          <button
+            class="btn btn-ghost"
+            @click="togglePause"
+            :disabled="ai.enabled || state.phase === 'ready' || state.phase === 'over'"
+          >
             {{ state.phase === 'paused' ? '继续' : '暂停' }}
           </button>
           <button class="btn btn-primary" @click="restart">重新开始</button>
@@ -158,6 +177,8 @@ const downRepeat = repeat(() => softDrop())
 
         <!-- 右栏 -->
         <aside class="col col--right">
+          <JevPanel :ai="ai" @toggle="toggleAi" @save-key="saveApiKey" />
+
           <section class="panel glass">
             <h2 class="panel__title">下一个</h2>
             <div class="next-list">
@@ -226,11 +247,30 @@ const downRepeat = repeat(() => softDrop())
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn-ai {
+  background: linear-gradient(135deg, rgba(124, 92, 255, 0.28), rgba(34, 211, 238, 0.2));
+  border-color: rgba(34, 211, 238, 0.42);
+  color: #c4f4ff;
+}
+
+.btn-ai:hover {
+  border-color: rgba(34, 211, 238, 0.7);
+  background: linear-gradient(135deg, rgba(124, 92, 255, 0.42), rgba(34, 211, 238, 0.3));
+}
+
+.btn-ai.is-on {
+  background: linear-gradient(135deg, #7df9ff, #a58bff 55%, #ff4d8d);
+  border-color: transparent;
+  color: #04101c;
+  animation: pulseGlow 1.8s ease-out infinite;
 }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(160px, 200px) minmax(0, 1fr) minmax(170px, 220px);
+  grid-template-columns: minmax(160px, 200px) minmax(0, 1fr) minmax(232px, 286px);
   gap: 20px;
   align-items: start;
 }
@@ -511,7 +551,7 @@ kbd {
 
 @media (max-width: 1080px) {
   .layout {
-    grid-template-columns: minmax(0, 1fr) minmax(150px, 190px);
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 260px);
   }
   .col--left {
     grid-column: 1 / -1;

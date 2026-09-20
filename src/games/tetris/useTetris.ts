@@ -1,7 +1,26 @@
 import { onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { TetrisEngine, type GameEvent, type Snapshot } from './engine'
-import { TetrisRenderer } from './renderer'
+import { TetrisRenderer, type TargetOverlay } from './renderer'
+import { decidePlacement, type Decision, type RankedOption } from './jev'
+import { getJevKey, maskJevKey, setJevKey } from '@/lib/typesafe'
 import { sfx } from '@/utils/sfx'
+
+export interface TetrisAiState {
+  enabled: boolean
+  status: 'off' | 'waiting' | 'thinking' | 'acting' | 'restarting'
+  decision: Decision | null
+  ranked: RankedOption[]
+  history: Decision[]
+  error: string
+  hasKey: boolean
+  maskedKey: string
+  games: number
+  decisions: number
+  fallbacks: number
+  inputTokens: number
+  outputTokens: number
+  avgLatency: number
+}
 
 function emptySnapshot(): Snapshot {
   return {
@@ -21,14 +40,42 @@ function emptySnapshot(): Snapshot {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function resumeIfPaused(engine: TetrisEngine): void {
+  if (engine.phase === 'paused') engine.start()
+}
+
 export function useTetris(options: { onGameOver?: (score: number, lines: number) => void } = {}) {
   const canvas = ref<HTMLCanvasElement | null>(null)
   const state = reactive<Snapshot>(emptySnapshot())
   const engine = shallowRef<TetrisEngine | null>(null)
 
+  const initialKey = getJevKey()
+  const ai = reactive<TetrisAiState>({
+    enabled: false,
+    status: 'off',
+    decision: null,
+    ranked: [],
+    history: [],
+    error: '',
+    hasKey: Boolean(initialKey),
+    maskedKey: maskJevKey(initialKey),
+    games: 0,
+    decisions: 0,
+    fallbacks: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    avgLatency: 0,
+  })
+
   let renderer: TetrisRenderer | null = null
   let raf = 0
   let last = 0
+  let aiTarget: TargetOverlay | null = null
+  let aiRunToken = 0
 
   function sync(): void {
     const e = engine.value
@@ -87,7 +134,7 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
     if (!e) return
 
     e.update(dt)
-    renderer?.draw(e.serialize(), dt)
+    renderer?.draw(e.serialize(), dt, aiTarget)
     sync()
   }
 
@@ -109,28 +156,34 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
   }
 
   function togglePause(): void {
+    if (ai.enabled) return
     engine.value?.togglePause()
     sync()
   }
 
   function move(dx: number): void {
+    if (ai.enabled) return
     engine.value?.move(dx)
   }
 
   function rotate(dir: 1 | -1): void {
+    if (ai.enabled) return
     engine.value?.rotate(dir)
   }
 
   function softDrop(): void {
+    if (ai.enabled) return
     engine.value?.softDrop()
   }
 
   function hardDrop(): void {
+    if (ai.enabled) return
     engine.value?.hardDrop()
     sync()
   }
 
   function hold(): void {
+    if (ai.enabled) return
     engine.value?.holdPiece()
     sync()
   }
@@ -141,6 +194,11 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
 
     const key = event.key
     const code = event.code
+
+    if (ai.enabled) {
+      if (code === 'Space' || key === 'p' || key === 'P' || key === 'Escape') event.preventDefault()
+      return
+    }
 
     if (key === 'Enter' && (e.phase === 'ready' || e.phase === 'over')) {
       event.preventDefault()
@@ -187,6 +245,159 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
     event.preventDefault()
   }
 
+  function recordDecision(decision: Decision): void {
+    ai.decision = decision
+    ai.ranked = decision.ranked
+    ai.history.unshift(decision)
+    if (ai.history.length > 12) ai.history.length = 12
+    ai.decisions += 1
+    if (decision.source === 'fallback') {
+      ai.fallbacks += 1
+      ai.error = decision.error
+    } else {
+      ai.error = ''
+    }
+    ai.inputTokens += decision.inputTokens
+    ai.outputTokens += decision.outputTokens
+    ai.avgLatency = Math.round(
+      (ai.avgLatency * (ai.decisions - 1) + decision.latencyMs) / ai.decisions,
+    )
+  }
+
+  /** 永不停歇的 Jev 外挂主循环：思考 → 高亮落点 → 执行 → 消行/结束自动重开 */
+  async function aiLoop(token: number): Promise<void> {
+    while (ai.enabled && token === aiRunToken) {
+      const e = engine.value
+      if (!e) {
+        await sleep(120)
+        continue
+      }
+
+      try {
+        if (e.phase === 'over') {
+          ai.status = 'restarting'
+          aiTarget = null
+          await sleep(1500)
+          if (!ai.enabled || token !== aiRunToken) return
+          ai.games += 1
+          e.reset()
+          e.start()
+          sync()
+          continue
+        }
+
+        if (e.phase !== 'playing' || !e.active) {
+          await sleep(50)
+          continue
+        }
+        if (e.entryElapsed > 60) {
+          await sleep(40)
+          continue
+        }
+
+        e.pause()
+        ai.status = 'thinking'
+        const snapshot = e.serialize()
+
+        let decision: Decision
+        try {
+          decision = await decidePlacement(snapshot)
+        } catch (error) {
+          ai.error = error instanceof Error ? error.message : '决策失败'
+          await sleep(260)
+          resumeIfPaused(e)
+          continue
+        }
+
+        if (!ai.enabled || token !== aiRunToken) {
+          resumeIfPaused(e)
+          return
+        }
+
+        recordDecision(decision)
+        aiTarget = {
+          matrix: decision.placement.matrix,
+          x: decision.placement.x,
+          y: decision.placement.y,
+          type: decision.placement.piece,
+        }
+        ai.status = 'acting'
+        await sleep(300)
+
+        if (!ai.enabled || token !== aiRunToken) {
+          aiTarget = null
+          resumeIfPaused(e)
+          return
+        }
+
+        e.start()
+        const piece = e.active
+        const rotations = (decision.placement.rotation - (piece?.rotation ?? 0) + 4) % 4
+
+        for (let i = 0; i < rotations; i++) {
+          if (!ai.enabled || token !== aiRunToken || e.active !== piece) break
+          e.rotate(1)
+          sync()
+          await sleep(65)
+        }
+
+        let guard = 0
+        while (piece && e.active === piece && e.active.x !== decision.placement.x && guard++ < 14) {
+          if (!ai.enabled || token !== aiRunToken) break
+          e.move(decision.placement.x > e.active.x ? 1 : -1)
+          sync()
+          await sleep(38)
+        }
+
+        if (ai.enabled && token === aiRunToken && piece && e.active === piece) {
+          e.hardDrop()
+          sync()
+        }
+
+        aiTarget = null
+        await sleep(120)
+      } catch (error) {
+        ai.error = error instanceof Error ? error.message : '外挂循环异常'
+        aiTarget = null
+        await sleep(400)
+      }
+    }
+
+    aiTarget = null
+  }
+
+  function toggleAi(): void {
+    const e = engine.value
+    if (!e) return
+
+    ai.enabled = !ai.enabled
+    aiRunToken += 1
+
+    if (ai.enabled) {
+      ai.error = ''
+      ai.status = 'waiting'
+      if (e.phase === 'over') e.reset()
+      e.start()
+      sync()
+      void aiLoop(aiRunToken)
+    } else {
+      ai.status = 'off'
+      aiTarget = null
+      if (e.phase === 'paused') {
+        e.start()
+        sync()
+      }
+    }
+  }
+
+  function saveApiKey(key: string): void {
+    setJevKey(key)
+    const current = getJevKey()
+    ai.hasKey = Boolean(current)
+    ai.maskedKey = maskJevKey(current)
+    ai.error = ''
+  }
+
   onMounted(() => {
     if (canvas.value) {
       renderer = new TetrisRenderer(canvas.value)
@@ -201,6 +412,7 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
   })
 
   onBeforeUnmount(() => {
+    aiRunToken += 1
     cancelAnimationFrame(raf)
     window.removeEventListener('keydown', onKeyDown)
     window.removeEventListener('resize', resize)
@@ -211,9 +423,12 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
   return {
     canvas,
     state,
+    ai,
     start,
     restart,
     togglePause,
+    toggleAi,
+    saveApiKey,
     move,
     rotate,
     softDrop,

@@ -8,6 +8,13 @@ interface DrawOptions {
   glow?: number
 }
 
+export interface TargetOverlay {
+  matrix: number[][]
+  x: number
+  y: number
+  type: PieceType
+}
+
 function roundRect(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -207,7 +214,75 @@ export class TetrisRenderer {
     ctx.restore()
   }
 
-  draw(snapshot: Snapshot, dt: number): void {
+  /** 高亮 Jev 选择的落点 */
+  private drawTarget(target: TargetOverlay): void {
+    const { ctx, cell } = this
+
+    let minC = target.matrix.length
+    let maxC = -1
+    for (const row of target.matrix) {
+      for (let c = 0; c < row.length; c++) {
+        if (!row[c]) continue
+        minC = Math.min(minC, c)
+        maxC = Math.max(maxC, c)
+      }
+    }
+
+    const pulse = 0.5 + Math.sin(this.time / 170) * 0.2
+    const fieldH = cell * ROWS
+    const centerX = (target.x + (minC + maxC + 1) / 2) * cell
+    const topY = Math.max(0, target.y * cell)
+
+    ctx.save()
+    ctx.setLineDash([cell * 0.3, cell * 0.34])
+    ctx.strokeStyle = `rgba(251, 191, 36, ${0.16 + pulse * 0.14})`
+    ctx.lineWidth = Math.max(1, cell * 0.05)
+    ctx.beginPath()
+    ctx.moveTo(centerX, 0)
+    ctx.lineTo(centerX, topY)
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    for (let r = 0; r < target.matrix.length; r++) {
+      for (let c = 0; c < target.matrix[r].length; c++) {
+        if (!target.matrix[r][c]) continue
+        const py = target.y + r
+        if (py < 0 || py >= ROWS) continue
+        const px = target.x + c
+        const inset = cell * 0.08
+        const x = px * cell + inset
+        const y = py * cell + inset
+        const size = cell - inset * 2
+
+        ctx.globalAlpha = 0.12 + pulse * 0.12
+        ctx.fillStyle = '#fbbf24'
+        roundRect(ctx, x, y, size, size, cell * 0.22)
+        ctx.fill()
+
+        ctx.globalAlpha = 0.7 + pulse * 0.3
+        ctx.strokeStyle = '#fbbf24'
+        ctx.lineWidth = Math.max(1.5, cell * 0.065)
+        ctx.shadowColor = '#fbbf24'
+        ctx.shadowBlur = cell * (0.45 + pulse * 0.35)
+        roundRect(ctx, x, y, size, size, cell * 0.22)
+        ctx.stroke()
+        ctx.shadowBlur = 0
+      }
+    }
+
+    // 底部落点横线
+    ctx.globalAlpha = 0.35 + pulse * 0.25
+    ctx.strokeStyle = '#fbbf24'
+    ctx.lineWidth = Math.max(1, cell * 0.05)
+    ctx.beginPath()
+    ctx.moveTo(0, Math.min(fieldH, (target.y + target.matrix.length) * cell) + 0.5)
+    ctx.lineTo(cell * COLS, Math.min(fieldH, (target.y + target.matrix.length) * cell) + 0.5)
+    ctx.stroke()
+
+    ctx.restore()
+  }
+
+  draw(snapshot: Snapshot, dt: number, target: TargetOverlay | null = null): void {
     const { ctx, cell, offsetX, offsetY } = this
     this.time += dt
 
@@ -289,6 +364,8 @@ export class TetrisRenderer {
         }
       }
     }
+
+    if (target) this.drawTarget(target)
 
     ctx.restore()
   }
