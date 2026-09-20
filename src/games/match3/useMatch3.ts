@@ -14,7 +14,7 @@ import {
   type LevelConfig,
 } from './constants'
 import { decideMove, type Decision, type Match3Snapshot, type RankedOption } from './jev'
-import { getJevKey, maskJevKey, setJevKey } from '@/lib/typesafe'
+import { getJevKey, JevAuthError, maskJevKey, setJevKey, verifyJevKey } from '@/lib/typesafe'
 import { sfx } from '@/utils/sfx'
 
 export interface Tile {
@@ -47,6 +47,10 @@ export interface Match3AiState {
   error: string
   hasKey: boolean
   maskedKey: string
+  /** 正在校验 API Key */
+  checkingKey: boolean
+  /** 上一次输入的 API Key 无效，需要重新输入 */
+  keyInvalid: boolean
   levels: number
   decisions: number
   fallbacks: number
@@ -94,6 +98,8 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
     error: '',
     hasKey: Boolean(initialKey),
     maskedKey: maskJevKey(initialKey),
+    checkingKey: false,
+    keyInvalid: false,
     levels: 0,
     decisions: 0,
     fallbacks: 0,
@@ -656,6 +662,10 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
         try {
           decision = await decideMove(snapshot)
         } catch (error) {
+          if (error instanceof JevAuthError) {
+            invalidateKey(error.message)
+            return
+          }
           ai.error = error instanceof Error ? error.message : '决策失败'
           ai.status = 'waiting'
           await delay(320)
@@ -696,7 +706,29 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
     hint.value = []
   }
 
+  /** API Key 失效：停止外挂并清空本地 Key，要求用户重新输入 */
+  function invalidateKey(message: string): void {
+    setJevKey('')
+    ai.enabled = false
+    ai.status = 'off'
+    ai.hasKey = Boolean(getJevKey())
+    ai.maskedKey = maskJevKey(getJevKey())
+    ai.keyInvalid = true
+    ai.error = message || 'API Key 无效，请重新输入'
+    aiRunToken += 1
+    hint.value = []
+  }
+
   function toggleAi(): void {
+    if (ai.checkingKey) return
+
+    if (!ai.enabled && (!ai.hasKey || ai.keyInvalid)) {
+      ai.error = ai.keyInvalid
+        ? 'API Key 无效，请重新输入后再开启 JEV 外挂'
+        : '请先填写 TypeSafe API Key 再开启 JEV 外挂'
+      return
+    }
+
     ai.enabled = !ai.enabled
     aiRunToken += 1
 
@@ -727,12 +759,29 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
     void aiLoop(aiRunToken)
   }
 
-  function saveApiKey(key: string): void {
-    setJevKey(key)
-    const current = getJevKey()
-    ai.hasKey = Boolean(current)
-    ai.maskedKey = maskJevKey(current)
+  async function saveApiKey(key: string): Promise<void> {
+    ai.checkingKey = true
+    ai.keyInvalid = false
     ai.error = ''
+
+    try {
+      await verifyJevKey(key)
+      setJevKey(key)
+      ai.hasKey = true
+      ai.maskedKey = maskJevKey(key)
+    } catch (error) {
+      if (error instanceof JevAuthError) {
+        setJevKey('')
+        ai.hasKey = Boolean(getJevKey())
+        ai.maskedKey = maskJevKey(getJevKey())
+        ai.keyInvalid = true
+        ai.error = 'API Key 无效，请重新输入'
+      } else {
+        ai.error = error instanceof Error ? error.message : 'API Key 校验失败，请重试'
+      }
+    } finally {
+      ai.checkingKey = false
+    }
   }
 
   onMounted(() => {

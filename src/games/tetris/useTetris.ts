@@ -2,7 +2,7 @@ import { onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { TetrisEngine, type GameEvent, type Snapshot } from './engine'
 import { TetrisRenderer, type TargetOverlay } from './renderer'
 import { decidePlacement, type Decision, type RankedOption } from './jev'
-import { getJevKey, maskJevKey, setJevKey } from '@/lib/typesafe'
+import { getJevKey, JevAuthError, maskJevKey, setJevKey, verifyJevKey } from '@/lib/typesafe'
 import { sfx } from '@/utils/sfx'
 
 export interface TetrisAiState {
@@ -14,6 +14,10 @@ export interface TetrisAiState {
   error: string
   hasKey: boolean
   maskedKey: string
+  /** 正在校验 API Key */
+  checkingKey: boolean
+  /** 上一次输入的 API Key 无效，需要重新输入 */
+  keyInvalid: boolean
   games: number
   decisions: number
   fallbacks: number
@@ -63,6 +67,8 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
     error: '',
     hasKey: Boolean(initialKey),
     maskedKey: maskJevKey(initialKey),
+    checkingKey: false,
+    keyInvalid: false,
     games: 0,
     decisions: 0,
     fallbacks: 0,
@@ -303,6 +309,10 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
         try {
           decision = await decidePlacement(snapshot)
         } catch (error) {
+          if (error instanceof JevAuthError) {
+            invalidateKey(error.message)
+            return
+          }
           ai.error = error instanceof Error ? error.message : '决策失败'
           await sleep(260)
           resumeIfPaused(e)
@@ -366,9 +376,35 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
     aiTarget = null
   }
 
+  /** API Key 失效：停止外挂并清空本地 Key，要求用户重新输入 */
+  function invalidateKey(message: string): void {
+    setJevKey('')
+    ai.enabled = false
+    ai.status = 'off'
+    ai.hasKey = Boolean(getJevKey())
+    ai.maskedKey = maskJevKey(getJevKey())
+    ai.keyInvalid = true
+    ai.error = message || 'API Key 无效，请重新输入'
+    aiTarget = null
+    aiRunToken += 1
+
+    const e = engine.value
+    if (e && e.phase === 'paused') {
+      e.start()
+      sync()
+    }
+  }
+
   function toggleAi(): void {
     const e = engine.value
-    if (!e) return
+    if (!e || ai.checkingKey) return
+
+    if (!ai.enabled && (!ai.hasKey || ai.keyInvalid)) {
+      ai.error = ai.keyInvalid
+        ? 'API Key 无效，请重新输入后再开启 JEV 外挂'
+        : '请先填写 TypeSafe API Key 再开启 JEV 外挂'
+      return
+    }
 
     ai.enabled = !ai.enabled
     aiRunToken += 1
@@ -390,12 +426,29 @@ export function useTetris(options: { onGameOver?: (score: number, lines: number)
     }
   }
 
-  function saveApiKey(key: string): void {
-    setJevKey(key)
-    const current = getJevKey()
-    ai.hasKey = Boolean(current)
-    ai.maskedKey = maskJevKey(current)
+  async function saveApiKey(key: string): Promise<void> {
+    ai.checkingKey = true
+    ai.keyInvalid = false
     ai.error = ''
+
+    try {
+      await verifyJevKey(key)
+      setJevKey(key)
+      ai.hasKey = true
+      ai.maskedKey = maskJevKey(key)
+    } catch (error) {
+      if (error instanceof JevAuthError) {
+        setJevKey('')
+        ai.hasKey = Boolean(getJevKey())
+        ai.maskedKey = maskJevKey(getJevKey())
+        ai.keyInvalid = true
+        ai.error = 'API Key 无效，请重新输入'
+      } else {
+        ai.error = error instanceof Error ? error.message : 'API Key 校验失败，请重试'
+      }
+    } finally {
+      ai.checkingKey = false
+    }
   }
 
   onMounted(() => {

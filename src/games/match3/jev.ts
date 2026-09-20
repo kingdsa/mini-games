@@ -1,4 +1,4 @@
-import { askJev, type ChoiceAnswer, type JevQuestion } from '@/lib/typesafe'
+import { askJev, JevAuthError, type ChoiceAnswer, type JevQuestion } from '@/lib/typesafe'
 import { BASE_POINTS, COLS, ROWS, comboMultiplier, type LevelConfig } from './constants'
 
 export interface Cell {
@@ -404,6 +404,7 @@ export async function decideMove(snapshot: Match3Snapshot): Promise<Decision> {
       at: Date.now(),
     }
   } catch (error) {
+    if (error instanceof JevAuthError) throw error
     const message = error instanceof Error ? error.message : '未知错误'
     return fallbackDecision(moves, message, startedAt)
   }

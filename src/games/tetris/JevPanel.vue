@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import PiecePreview from './PiecePreview.vue'
 import { PIECE_SKINS } from './constants'
+import { JEV_KEYS_URL } from '@/lib/typesafe'
 import type { TetrisAiState } from './useTetris'
 
 const props = defineProps<{ ai: TetrisAiState }>()
@@ -62,7 +63,7 @@ function formatTime(at: number): string {
 
 function submitKey(): void {
   const value = keyDraft.value.trim()
-  if (!value) return
+  if (!value || props.ai.checkingKey) return
   emit('saveKey', value)
   keyDraft.value = ''
 }
@@ -82,10 +83,10 @@ function submitKey(): void {
       </div>
       <button
         class="jev__switch"
-        :class="{ 'is-on': ai.enabled }"
+        :class="{ 'is-on': ai.enabled, 'is-locked': !ai.enabled && (!ai.hasKey || ai.keyInvalid) }"
         role="switch"
         :aria-checked="ai.enabled"
-        :title="ai.enabled ? '关闭外挂' : '开启外挂'"
+        :title="ai.enabled ? '关闭外挂' : ai.hasKey && !ai.keyInvalid ? '开启外挂' : '需先填写有效的 API Key'"
         @click="$emit('toggle')"
       >
         <span class="jev__knob" />
@@ -94,8 +95,12 @@ function submitKey(): void {
 
     <p class="jev__status">{{ statusLabel }}</p>
 
-    <div v-if="!ai.hasKey" class="jev__key">
-      <p class="jev__key-tip">未检测到 API Key，将使用本地启发式兜底。填入后由 Jev 接管决策。</p>
+    <div v-if="!ai.hasKey || ai.keyInvalid" class="jev__key" :class="{ 'is-invalid': ai.keyInvalid }">
+      <p class="jev__key-tip">
+        <template v-if="ai.keyInvalid">API Key 无效，请重新输入后再开启外挂。</template>
+        <template v-else>开启 JEV 外挂需要 TypeSafe API Key，只保存在本机浏览器。</template>
+        <a class="jev__key-link" :href="JEV_KEYS_URL" target="_blank" rel="noopener noreferrer">获取 API Key ↗</a>
+      </p>
       <div class="jev__key-row">
         <input
           v-model="keyDraft"
@@ -103,9 +108,12 @@ function submitKey(): void {
           placeholder="apikey_..."
           autocomplete="off"
           spellcheck="false"
+          :disabled="ai.checkingKey"
           @keyup.enter="submitKey"
         />
-        <button class="btn btn-ghost" @click="submitKey">保存</button>
+        <button class="btn btn-ghost" :disabled="ai.checkingKey || !keyDraft.trim()" @click="submitKey">
+          {{ ai.checkingKey ? '校验中…' : '保存并校验' }}
+        </button>
       </div>
     </div>
     <p v-else class="jev__key-hint">KEY {{ ai.maskedKey }} · 仅存本地</p>
@@ -254,6 +262,11 @@ function submitKey(): void {
   box-shadow: 0 0 18px -4px rgba(124, 92, 255, 0.9);
 }
 
+.jev__switch.is-locked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .jev__knob {
   position: absolute;
   top: 2px;
@@ -284,9 +297,31 @@ function submitKey(): void {
   border: 1px solid rgba(251, 191, 36, 0.28);
 }
 
+.jev__key.is-invalid {
+  background: rgba(248, 113, 113, 0.1);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
 .jev__key-tip {
   font-size: 11px;
+  line-height: 1.5;
   color: #f3d08a;
+}
+
+.jev__key.is-invalid .jev__key-tip {
+  color: #ffc9c9;
+}
+
+.jev__key-link {
+  color: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
+.jev__key-row input:disabled {
+  opacity: 0.6;
 }
 
 .jev__key-row {

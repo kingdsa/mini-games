@@ -1,4 +1,4 @@
-import { askJev, type ChoiceAnswer, type JevQuestion } from '@/lib/typesafe'
+import { askJev, JevAuthError, type ChoiceAnswer, type JevQuestion } from '@/lib/typesafe'
 import { COLS, ROWS, SHAPES, type PieceType } from './constants'
 import type { Cell, Snapshot } from './engine'
 
@@ -375,6 +375,7 @@ export async function decidePlacement(snapshot: Snapshot): Promise<Decision> {
       at: Date.now(),
     }
   } catch (error) {
+    if (error instanceof JevAuthError) throw error
     const message = error instanceof Error ? error.message : '未知错误'
     return fallbackDecision(snapshot, placements, message, startedAt)
   }
