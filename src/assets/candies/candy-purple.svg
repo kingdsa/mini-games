@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="petal" cx="42%" cy="30%" r="80%">
+      <stop offset="0%" stop-color="#fbeaff"/>
+      <stop offset="30%" stop-color="#c084fc"/>
+      <stop offset="74%" stop-color="#8b31e6"/>
+      <stop offset="100%" stop-color="#4c0b8f"/>
+    </radialGradient>
+    <radialGradient id="core" cx="40%" cy="32%" r="80%">
+      <stop offset="0%" stop-color="#fffdf0"/>
+      <stop offset="60%" stop-color="#ffd76a"/>
+      <stop offset="100%" stop-color="#e08b00"/>
+    </radialGradient>
+  </defs>
+  <ellipse cx="50" cy="88" rx="27" ry="6" fill="#3a0769" opacity=".3"/>
+  <g fill="url(#petal)" stroke="#ffffff" stroke-opacity=".5" stroke-width="2">
+    <ellipse cx="50" cy="24" rx="14" ry="18"/>
+    <ellipse cx="75" cy="42" rx="14" ry="18" transform="rotate(60 75 42)"/>
+    <ellipse cx="66" cy="73" rx="14" ry="18" transform="rotate(125 66 73)"/>
+    <ellipse cx="34" cy="73" rx="14" ry="18" transform="rotate(-125 34 73)"/>
+    <ellipse cx="25" cy="42" rx="14" ry="18" transform="rotate(-60 25 42)"/>
+  </g>
+  <circle cx="50" cy="51" r="16" fill="url(#core)"/>
+  <circle cx="44" cy="45" r="5" fill="#fff" opacity=".8"/>
+</svg>

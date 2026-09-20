@@ -1,0 +1,581 @@
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
+import {
+  BASE_POINTS,
+  CLEAR_MS,
+  COLS,
+  COMBO_PAUSE_MS,
+  FALL_MS,
+  LEVELS,
+  ROWS,
+  STAR_MULTIPLIERS,
+  SWAP_MS,
+  comboMultiplier,
+  starsFor,
+  type LevelConfig,
+} from './constants'
+import { sfx } from '@/utils/sfx'
+
+export interface Tile {
+  id: number
+  type: number
+  row: number
+  col: number
+  clearing: boolean
+}
+
+export interface Popup {
+  id: number
+  row: number
+  col: number
+  text: string
+  tone: 'normal' | 'combo' | 'big'
+}
+
+export type Match3Phase = 'ready' | 'playing' | 'paused' | 'won' | 'over'
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function raf(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()))
+}
+
+let uid = 1
+
+export function useMatch3(options: { onLevelEnd?: (score: number, level: number, stars: number) => void } = {}) {
+  const grid = reactive<(Tile | null)[][]>(
+    Array.from({ length: ROWS }, () => Array<Tile | null>(COLS).fill(null)),
+  )
+
+  const phase = ref<Match3Phase>('ready')
+  const levelIndex = ref(0)
+  const score = ref(0)
+  const moves = ref(0)
+  const combo = ref(0)
+  const bestCombo = ref(0)
+  const selected = shallowRef<Tile | null>(null)
+  const hint = shallowRef<Tile[]>([])
+  const popups = ref<Popup[]>([])
+  const toast = ref('')
+  const busy = ref(false)
+  const wrongPair = shallowRef<Tile[]>([])
+  const stars = ref(0)
+
+  let idleTimer: number | undefined
+  let toastTimer: number | undefined
+
+  const level = computed<LevelConfig>(() => LEVELS[Math.min(levelIndex.value, LEVELS.length - 1)])
+  const typeCount = computed(() => level.value.types)
+  const barMax = computed(() => level.value.target * STAR_MULTIPLIERS[2])
+  const progress = computed(() => Math.min(1, score.value / barMax.value))
+  const movesLeft = computed(() => Math.max(0, moves.value))
+
+  const tiles = computed<Tile[]>(() => {
+    const out: Tile[] = []
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const tile = grid[r][c]
+        if (tile) out.push(tile)
+      }
+    }
+    return out
+  })
+
+  /* ------------------------------------------------------------------ */
+  /* 基础工具                                                            */
+  /* ------------------------------------------------------------------ */
+
+  function randType(): number {
+    return Math.floor(Math.random() * typeCount.value)
+  }
+
+  function makeTile(row: number, col: number, type?: number, visualRow?: number): Tile {
+    return reactive<Tile>({
+      id: uid++,
+      type: type ?? randType(),
+      row: visualRow ?? row,
+      col,
+      clearing: false,
+    })
+  }
+
+  function tileAt(r: number, c: number): Tile | null {
+    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return null
+    return grid[r][c]
+  }
+
+  function showToast(text: string): void {
+    toast.value = text
+    window.clearTimeout(toastTimer)
+    toastTimer = window.setTimeout(() => (toast.value = ''), 1800)
+  }
+
+  function addPopup(row: number, col: number, text: string, tone: Popup['tone']): void {
+    const popup: Popup = { id: uid++, row, col, text, tone }
+    popups.value.push(popup)
+    window.setTimeout(() => {
+      popups.value = popups.value.filter((p) => p.id !== popup.id)
+    }, 1000)
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 棋盘生成                                                            */
+  /* ------------------------------------------------------------------ */
+
+  function safeType(r: number, c: number): number {
+    const banned = new Set<number>()
+    const left1 = tileAt(r, c - 1)
+    const left2 = tileAt(r, c - 2)
+    if (left1 && left2 && left1.type === left2.type) banned.add(left1.type)
+    const up1 = tileAt(r - 1, c)
+    const up2 = tileAt(r - 2, c)
+    if (up1 && up2 && up1.type === up2.type) banned.add(up1.type)
+
+    const pool: number[] = []
+    for (let t = 0; t < typeCount.value; t++) if (!banned.has(t)) pool.push(t)
+    if (pool.length === 0) return randType()
+    return pool[Math.floor(Math.random() * pool.length)]
+  }
+
+  function buildBoard(): void {
+    let attempts = 0
+    do {
+      attempts++
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          grid[r][c] = makeTile(r, c, safeType(r, c))
+        }
+      }
+    } while (!hasPossibleMove() && attempts < 30)
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 匹配检测                                                            */
+  /* ------------------------------------------------------------------ */
+
+  function findMatches(): Tile[] {
+    const found = new Set<Tile>()
+
+    const scan = (get: (i: number) => Tile | null, length: number) => {
+      let start = 0
+      for (let i = 1; i <= length; i++) {
+        const prev = get(i - 1)
+        const cur = i < length ? get(i) : null
+        const same = !!prev && !!cur && cur.type === prev.type
+        if (!same) {
+          const runLength = i - start
+          if (runLength >= 3) {
+            for (let k = start; k < i; k++) {
+              const t = get(k)
+              if (t) found.add(t)
+            }
+          }
+          start = i
+        }
+      }
+    }
+
+    for (let r = 0; r < ROWS; r++) scan((c) => grid[r][c], COLS)
+    for (let c = 0; c < COLS; c++) scan((r) => grid[r][c], ROWS)
+
+    return [...found]
+  }
+
+  function anyMatch(g: (number | null)[][]): boolean {
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const v = g[r][c]
+        if (v === null) continue
+        if (c >= 2 && g[r][c - 1] === v && g[r][c - 2] === v) return true
+        if (r >= 2 && g[r - 1][c] === v && g[r - 2][c] === v) return true
+      }
+    }
+    return false
+  }
+
+  function typeMatrix(): (number | null)[][] {
+    const out: (number | null)[][] = []
+    for (let r = 0; r < ROWS; r++) {
+      const row: (number | null)[] = []
+      for (let c = 0; c < COLS; c++) row.push(grid[r][c]?.type ?? null)
+      out.push(row)
+    }
+    return out
+  }
+
+  function findPossibleMove(): [Tile, Tile] | null {
+    const g = typeMatrix()
+    const swap = (r1: number, c1: number, r2: number, c2: number) => {
+      const tmp = g[r1][c1]
+      g[r1][c1] = g[r2][c2]
+      g[r2][c2] = tmp
+    }
+
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (c + 1 < COLS) {
+          swap(r, c, r, c + 1)
+          if (anyMatch(g)) {
+            swap(r, c, r, c + 1)
+            const a = tileAt(r, c)
+            const b = tileAt(r, c + 1)
+            if (a && b) return [a, b]
+          }
+          swap(r, c, r, c + 1)
+        }
+        if (r + 1 < ROWS) {
+          swap(r, c, r + 1, c)
+          if (anyMatch(g)) {
+            swap(r, c, r + 1, c)
+            const a = tileAt(r, c)
+            const b = tileAt(r + 1, c)
+            if (a && b) return [a, b]
+          }
+          swap(r, c, r + 1, c)
+        }
+      }
+    }
+    return null
+  }
+
+  function hasPossibleMove(): boolean {
+    return findPossibleMove() !== null
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 动画辅助                                                            */
+  /* ------------------------------------------------------------------ */
+
+  async function settle(): Promise<void> {
+    await nextTick()
+    await raf()
+    await raf()
+  }
+
+  async function applyGravity(): Promise<void> {
+    const spawns: Array<{ tile: Tile; target: number }> = []
+
+    for (let c = 0; c < COLS; c++) {
+      let write = ROWS - 1
+      for (let r = ROWS - 1; r >= 0; r--) {
+        const tile = grid[r][c]
+        if (!tile) continue
+        if (r !== write) {
+          grid[write][c] = tile
+          grid[r][c] = null
+          tile.row = write
+        }
+        write--
+      }
+
+      let offset = 1
+      for (let r = write; r >= 0; r--) {
+        const tile = makeTile(r, c, undefined, -offset)
+        grid[r][c] = tile
+        spawns.push({ tile, target: r })
+        offset++
+      }
+    }
+
+    if (spawns.length > 0) {
+      await settle()
+      for (const item of spawns) item.tile.row = item.target
+      await delay(FALL_MS)
+    }
+  }
+
+  async function shuffleBoard(reason: string): Promise<void> {
+    showToast(reason)
+    const all = tiles.value
+    for (const t of all) t.clearing = true
+    await delay(220)
+    for (const t of all) t.clearing = false
+
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const pool = all.map((t) => t.type)
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        ;[pool[i], pool[j]] = [pool[j], pool[i]]
+      }
+      all.forEach((t, i) => (t.type = pool[i]))
+      if (!anyMatch(typeMatrix()) && hasPossibleMove()) break
+    }
+
+    all.forEach((t) => (t.clearing = true))
+    await delay(160)
+    all.forEach((t) => (t.clearing = false))
+    await delay(120)
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 消除与结算                                                          */
+  /* ------------------------------------------------------------------ */
+
+  async function resolve(): Promise<void> {
+    let chain = 0
+
+    for (;;) {
+      const matches = findMatches()
+      if (matches.length === 0) break
+
+      chain++
+      combo.value = chain
+      bestCombo.value = Math.max(bestCombo.value, chain)
+
+      const multiplier = comboMultiplier(chain)
+      const gained = Math.round(matches.length * BASE_POINTS * multiplier)
+      score.value += gained
+
+      sfx.match(chain - 1)
+
+      const rows = matches.map((t) => t.row)
+      const cols = matches.map((t) => t.col)
+      const centerRow = rows.reduce((a, b) => a + b, 0) / rows.length
+      const centerCol = cols.reduce((a, b) => a + b, 0) / cols.length
+      const tone: Popup['tone'] = chain >= 3 ? 'big' : chain === 2 ? 'combo' : 'normal'
+      const label = chain > 1 ? `+${gained} ×${chain}` : `+${gained}`
+      addPopup(centerRow, centerCol, label, tone)
+
+      for (const t of matches) t.clearing = true
+      await delay(CLEAR_MS)
+
+      for (const t of matches) {
+        if (grid[t.row][t.col] === t) grid[t.row][t.col] = null
+      }
+
+      await applyGravity()
+      if (chain > 1) await delay(COMBO_PAUSE_MS)
+    }
+
+    combo.value = 0
+
+    if (!hasPossibleMove()) {
+      await shuffleBoard('没有可消除的组合，自动洗牌')
+    }
+
+    scheduleHint()
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 玩家操作                                                            */
+  /* ------------------------------------------------------------------ */
+
+  function isAdjacent(a: Tile, b: Tile): boolean {
+    return Math.abs(a.row - b.row) + Math.abs(a.col - b.col) === 1
+  }
+
+  function swapInGrid(a: Tile, b: Tile): void {
+    const ar = a.row
+    const ac = a.col
+    grid[a.row][a.col] = b
+    grid[b.row][b.col] = a
+    a.row = b.row
+    a.col = b.col
+    b.row = ar
+    b.col = ac
+  }
+
+  async function attemptSwap(a: Tile, b: Tile): Promise<void> {
+    if (busy.value || phase.value !== 'playing') return
+    if (!isAdjacent(a, b)) return
+
+    busy.value = true
+    clearHint()
+    selected.value = null
+    sfx.swap()
+
+    swapInGrid(a, b)
+    await delay(SWAP_MS)
+
+    if (findMatches().length === 0) {
+      sfx.invalid()
+      wrongPair.value = [a, b]
+      swapInGrid(a, b)
+      await delay(SWAP_MS)
+      window.setTimeout(() => (wrongPair.value = []), 260)
+      busy.value = false
+      scheduleHint()
+      return
+    }
+
+    moves.value -= 1
+    await resolve()
+
+    if (score.value >= level.value.target) {
+      stars.value = starsFor(score.value, level.value.target)
+      phase.value = 'won'
+      sfx.win()
+      options.onLevelEnd?.(score.value, level.value.id, stars.value)
+    } else if (moves.value <= 0) {
+      stars.value = starsFor(score.value, level.value.target)
+      phase.value = 'over'
+      sfx.gameOver()
+      options.onLevelEnd?.(score.value, level.value.id, stars.value)
+    }
+
+    busy.value = false
+  }
+
+  function onTileClick(tile: Tile): void {
+    if (busy.value || phase.value !== 'playing') return
+
+    const current = selected.value
+    if (!current) {
+      selected.value = tile
+      return
+    }
+    if (current.id === tile.id) {
+      selected.value = null
+      return
+    }
+    if (isAdjacent(current, tile)) {
+      void attemptSwap(current, tile)
+    } else {
+      selected.value = tile
+    }
+  }
+
+  const dragFrom = shallowRef<Tile | null>(null)
+  const dragCurrent = shallowRef<{ x: number; y: number } | null>(null)
+
+  function onTilePointerDown(tile: Tile, event: PointerEvent): void {
+    if (busy.value || phase.value !== 'playing') return
+    dragFrom.value = tile
+    dragCurrent.value = { x: event.clientX, y: event.clientY }
+  }
+
+  function onPointerMove(event: PointerEvent): void {
+    const from = dragFrom.value
+    if (!from || busy.value) return
+
+    const current = dragCurrent.value
+    if (!current) return
+
+    const dx = event.clientX - current.x
+    const dy = event.clientY - current.y
+    const threshold = 22
+    if (Math.abs(dx) < threshold && Math.abs(dy) < threshold) return
+
+    let dr = 0
+    let dc = 0
+    if (Math.abs(dx) > Math.abs(dy)) dc = dx > 0 ? 1 : -1
+    else dr = dy > 0 ? 1 : -1
+
+    const target = tileAt(from.row + dr, from.col + dc)
+    dragFrom.value = null
+    dragCurrent.value = null
+    if (target) void attemptSwap(from, target)
+  }
+
+  function onPointerUp(): void {
+    dragFrom.value = null
+    dragCurrent.value = null
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 提示                                                                */
+  /* ------------------------------------------------------------------ */
+
+  function clearHint(): void {
+    hint.value = []
+    window.clearTimeout(idleTimer)
+  }
+
+  function showHint(): void {
+    if (phase.value !== 'playing' || busy.value) return
+    const move = findPossibleMove()
+    if (move) hint.value = move
+  }
+
+  function scheduleHint(): void {
+    window.clearTimeout(idleTimer)
+    idleTimer = window.setTimeout(showHint, 6500)
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 关卡控制                                                            */
+  /* ------------------------------------------------------------------ */
+
+  function startLevel(index: number): void {
+    levelIndex.value = Math.max(0, Math.min(index, LEVELS.length - 1))
+    score.value = 0
+    moves.value = level.value.moves
+    combo.value = 0
+    bestCombo.value = 0
+    stars.value = 0
+    selected.value = null
+    popups.value = []
+    wrongPair.value = []
+    phase.value = 'playing'
+    busy.value = false
+    buildBoard()
+    scheduleHint()
+  }
+
+  function restart(): void {
+    startLevel(levelIndex.value)
+  }
+
+  function nextLevel(): void {
+    if (levelIndex.value >= LEVELS.length - 1) {
+      startLevel(0)
+      return
+    }
+    startLevel(levelIndex.value + 1)
+  }
+
+  function togglePause(): void {
+    if (phase.value === 'playing') phase.value = 'paused'
+    else if (phase.value === 'paused') phase.value = 'playing'
+  }
+
+  function useHint(): void {
+    showHint()
+    scheduleHint()
+  }
+
+  onMounted(() => {
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerUp)
+    startLevel(0)
+  })
+
+  onBeforeUnmount(() => {
+    window.removeEventListener('pointermove', onPointerMove)
+    window.removeEventListener('pointerup', onPointerUp)
+    window.removeEventListener('pointercancel', onPointerUp)
+    window.clearTimeout(idleTimer)
+    window.clearTimeout(toastTimer)
+  })
+
+  return {
+    grid,
+    tiles,
+    phase,
+    level,
+    levelIndex,
+    barMax,
+    score,
+    moves,
+    movesLeft,
+    combo,
+    bestCombo,
+    progress,
+    selected,
+    hint,
+    popups,
+    toast,
+    wrongPair,
+    stars,
+    busy,
+    startLevel,
+    restart,
+    nextLevel,
+    togglePause,
+    useHint,
+    onTileClick,
+    onTilePointerDown,
+  }
+}
