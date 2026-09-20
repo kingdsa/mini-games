@@ -13,6 +13,8 @@ import {
   starsFor,
   type LevelConfig,
 } from './constants'
+import { decideMove, type Decision, type Match3Snapshot, type RankedOption } from './jev'
+import { getJevKey, maskJevKey, setJevKey } from '@/lib/typesafe'
 import { sfx } from '@/utils/sfx'
 
 export interface Tile {
@@ -32,6 +34,26 @@ export interface Popup {
 }
 
 export type Match3Phase = 'ready' | 'playing' | 'paused' | 'won' | 'over'
+
+export type Match3AiStatus = 'off' | 'confirm' | 'waiting' | 'thinking' | 'acting' | 'levelEnd'
+
+export interface Match3AiState {
+  enabled: boolean
+  /** confirm 表示已进入关卡但等待用户点击确认后才接管 */
+  status: Match3AiStatus
+  decision: Decision | null
+  ranked: RankedOption[]
+  history: Decision[]
+  error: string
+  hasKey: boolean
+  maskedKey: string
+  levels: number
+  decisions: number
+  fallbacks: number
+  inputTokens: number
+  outputTokens: number
+  avgLatency: number
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -62,8 +84,27 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
   const wrongPair = shallowRef<Tile[]>([])
   const stars = ref(0)
 
+  const initialKey = getJevKey()
+  const ai = reactive<Match3AiState>({
+    enabled: false,
+    status: 'off',
+    decision: null,
+    ranked: [],
+    history: [],
+    error: '',
+    hasKey: Boolean(initialKey),
+    maskedKey: maskJevKey(initialKey),
+    levels: 0,
+    decisions: 0,
+    fallbacks: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    avgLatency: 0,
+  })
+
   let idleTimer: number | undefined
   let toastTimer: number | undefined
+  let aiRunToken = 0
 
   const level = computed<LevelConfig>(() => LEVELS[Math.min(levelIndex.value, LEVELS.length - 1)])
   const typeCount = computed(() => level.value.types)
@@ -406,6 +447,7 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
       stars.value = starsFor(score.value, level.value.target)
       phase.value = 'won'
       sfx.win()
+      if (ai.enabled && ai.status !== 'confirm') ai.levels += 1
       options.onLevelEnd?.(score.value, level.value.id, stars.value)
     } else if (moves.value <= 0) {
       stars.value = starsFor(score.value, level.value.target)
@@ -418,7 +460,7 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
   }
 
   function onTileClick(tile: Tile): void {
-    if (busy.value || phase.value !== 'playing') return
+    if (busy.value || phase.value !== 'playing' || aiOwnsBoard()) return
 
     const current = selected.value
     if (!current) {
@@ -440,14 +482,14 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
   const dragCurrent = shallowRef<{ x: number; y: number } | null>(null)
 
   function onTilePointerDown(tile: Tile, event: PointerEvent): void {
-    if (busy.value || phase.value !== 'playing') return
+    if (busy.value || phase.value !== 'playing' || aiOwnsBoard()) return
     dragFrom.value = tile
     dragCurrent.value = { x: event.clientX, y: event.clientY }
   }
 
   function onPointerMove(event: PointerEvent): void {
     const from = dragFrom.value
-    if (!from || busy.value) return
+    if (!from || busy.value || aiOwnsBoard()) return
 
     const current = dragCurrent.value
     if (!current) return
@@ -483,7 +525,7 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
   }
 
   function showHint(): void {
-    if (phase.value !== 'playing' || busy.value) return
+    if (phase.value !== 'playing' || busy.value || aiOwnsBoard()) return
     const move = findPossibleMove()
     if (move) hint.value = move
   }
@@ -511,6 +553,16 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
     busy.value = false
     buildBoard()
     scheduleHint()
+
+    // 进入（下一）关卡后不自动接管：等待用户点击确认
+    if (ai.enabled) {
+      aiRunToken += 1
+      ai.status = 'confirm'
+      ai.decision = null
+      ai.ranked = []
+      ai.error = ''
+      hint.value = []
+    }
   }
 
   function restart(): void {
@@ -535,6 +587,154 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
     scheduleHint()
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Jev 外挂                                                            */
+  /* ------------------------------------------------------------------ */
+
+  /** 外挂是否正控制棋盘（confirm 状态下允许玩家手动操作） */
+  function aiOwnsBoard(): boolean {
+    return ai.enabled && ai.status !== 'confirm'
+  }
+
+  function aiSnapshot(): Match3Snapshot {
+    return {
+      grid: typeMatrix(),
+      types: typeCount.value,
+      level: level.value,
+      score: score.value,
+      movesLeft: moves.value,
+      bestCombo: bestCombo.value,
+    }
+  }
+
+  function recordDecision(decision: Decision): void {
+    ai.decision = decision
+    ai.ranked = decision.ranked
+    ai.history.unshift(decision)
+    if (ai.history.length > 12) ai.history.length = 12
+    ai.decisions += 1
+    if (decision.source === 'fallback') {
+      ai.fallbacks += 1
+      ai.error = decision.error
+    } else {
+      ai.error = ''
+    }
+    ai.inputTokens += decision.inputTokens
+    ai.outputTokens += decision.outputTokens
+    ai.avgLatency = Math.round(
+      (ai.avgLatency * (ai.decisions - 1) + decision.latencyMs) / ai.decisions,
+    )
+  }
+
+  /**
+   * Jev 外挂主循环：思考 → 高亮交换 → 执行 → 消除。
+   * 关卡结束后停下；进入下一关由 startLevel 置为 confirm，需用户确认后再开新循环。
+   */
+  async function aiLoop(token: number): Promise<void> {
+    while (ai.enabled && token === aiRunToken) {
+      if (phase.value === 'won' || phase.value === 'over') {
+        ai.status = 'levelEnd'
+        return
+      }
+
+      if (phase.value !== 'playing') {
+        ai.status = 'waiting'
+        await delay(120)
+        continue
+      }
+
+      if (busy.value || ai.status === 'confirm') {
+        await delay(80)
+        continue
+      }
+
+      try {
+        ai.status = 'thinking'
+        const snapshot = aiSnapshot()
+
+        let decision: Decision
+        try {
+          decision = await decideMove(snapshot)
+        } catch (error) {
+          ai.error = error instanceof Error ? error.message : '决策失败'
+          ai.status = 'waiting'
+          await delay(320)
+          continue
+        }
+
+        if (!ai.enabled || token !== aiRunToken) return
+
+        recordDecision(decision)
+
+        const a = tileAt(decision.move.a.row, decision.move.a.col)
+        const b = tileAt(decision.move.b.row, decision.move.b.col)
+        if (!a || !b) {
+          await delay(140)
+          continue
+        }
+
+        hint.value = [a, b]
+        ai.status = 'acting'
+        await delay(360)
+
+        if (!ai.enabled || token !== aiRunToken) {
+          hint.value = []
+          return
+        }
+
+        await attemptSwap(a, b)
+        hint.value = []
+        await delay(160)
+      } catch (error) {
+        ai.error = error instanceof Error ? error.message : '外挂循环异常'
+        hint.value = []
+        ai.status = 'waiting'
+        await delay(420)
+      }
+    }
+
+    hint.value = []
+  }
+
+  function toggleAi(): void {
+    ai.enabled = !ai.enabled
+    aiRunToken += 1
+
+    if (ai.enabled) {
+      ai.error = ''
+      if (phase.value === 'playing') {
+        ai.status = 'waiting'
+        void aiLoop(aiRunToken)
+      } else {
+        ai.status = 'confirm'
+      }
+    } else {
+      ai.status = 'off'
+      hint.value = []
+    }
+  }
+
+  /** 用户点击确认后，外挂才在新关卡接管 */
+  function confirmAi(): void {
+    if (!ai.enabled) return
+    if (phase.value !== 'playing') {
+      ai.status = 'confirm'
+      return
+    }
+    aiRunToken += 1
+    ai.error = ''
+    ai.status = 'waiting'
+    void aiLoop(aiRunToken)
+  }
+
+  function saveApiKey(key: string): void {
+    setJevKey(key)
+    const current = getJevKey()
+    ai.hasKey = Boolean(current)
+    ai.maskedKey = maskJevKey(current)
+    ai.error = ''
+  }
+
   onMounted(() => {
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp)
@@ -543,6 +743,7 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
   })
 
   onBeforeUnmount(() => {
+    aiRunToken += 1
     window.removeEventListener('pointermove', onPointerMove)
     window.removeEventListener('pointerup', onPointerUp)
     window.removeEventListener('pointercancel', onPointerUp)
@@ -570,11 +771,15 @@ export function useMatch3(options: { onLevelEnd?: (score: number, level: number,
     wrongPair,
     stars,
     busy,
+    ai,
     startLevel,
     restart,
     nextLevel,
     togglePause,
     useHint,
+    toggleAi,
+    confirmAi,
+    saveApiKey,
     onTileClick,
     onTilePointerDown,
   }

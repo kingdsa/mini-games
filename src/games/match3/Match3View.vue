@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import CandySprite from './CandySprite.vue'
+import JevPanel from './JevPanel.vue'
 import StatTile from '@/components/StatTile.vue'
 import { useMatch3, type Tile } from './useMatch3'
 import { CANDIES, COLS, LEVELS, ROWS, STAR_MULTIPLIERS, starsFor } from './constants'
@@ -27,11 +28,15 @@ const {
   wrongPair,
   stars,
   busy,
+  ai,
   startLevel,
   restart,
   nextLevel,
   togglePause,
   useHint,
+  toggleAi,
+  confirmAi,
+  saveApiKey,
   onTileClick,
   onTilePointerDown,
 } = useMatch3({
@@ -83,7 +88,9 @@ const overlay = computed(() => {
   if (phase.value === 'won') {
     return {
       title: stars.value >= 3 ? '完美通关！' : '过关！',
-      desc: `本关得分 ${score.value.toLocaleString('zh-CN')} / 目标 ${level.value.target.toLocaleString('zh-CN')}`,
+      desc:
+        `本关得分 ${score.value.toLocaleString('zh-CN')} / 目标 ${level.value.target.toLocaleString('zh-CN')}` +
+        (ai.enabled ? ' · 下一关需再次确认才开启外挂' : ''),
       cta: atLastLevel.value ? '从第 1 关重新开始' : '进入下一关',
       action: nextLevel,
       stars: stars.value,
@@ -92,7 +99,9 @@ const overlay = computed(() => {
   if (phase.value === 'over') {
     return {
       title: '步数用完啦',
-      desc: `距离目标还差 ${(level.value.target - score.value).toLocaleString('zh-CN')} 分`,
+      desc:
+        `距离目标还差 ${(level.value.target - score.value).toLocaleString('zh-CN')} 分` +
+        (ai.enabled ? ' · 重开后需再次确认才开启外挂' : ''),
       cta: '再试一次',
       action: restart,
       stars: 0,
@@ -115,10 +124,13 @@ const overlay = computed(() => {
           <p class="game-head__sub">交换相邻糖果凑成三个同色即可消除，连锁越长得分越高</p>
         </div>
         <div class="game-head__actions">
+          <button class="btn btn-ai" :class="{ 'is-on': ai.enabled }" @click="toggleAi">
+            ⚡ {{ !ai.enabled ? 'JEV 外挂' : ai.status === 'confirm' ? '等待确认' : '外挂运行中' }}
+          </button>
           <button class="btn btn-ghost btn-icon" :title="soundOn ? '关闭音效' : '开启音效'" @click="soundOn = !soundOn">
             {{ soundOn ? '🔊' : '🔇' }}
           </button>
-          <button class="btn btn-ghost" @click="useHint" :disabled="busy">💡 提示</button>
+          <button class="btn btn-ghost" @click="useHint" :disabled="busy || ai.enabled">💡 提示</button>
           <button class="btn btn-ghost" @click="togglePause" :disabled="phase === 'won' || phase === 'over'">
             {{ phase === 'paused' ? '继续' : '暂停' }}
           </button>
@@ -246,6 +258,17 @@ const overlay = computed(() => {
               </div>
             </Transition>
 
+            <Transition name="overlay">
+              <div v-if="ai.enabled && ai.status === 'confirm'" class="ai-confirm">
+                <div class="ai-confirm__card">
+                  <p class="ai-confirm__flag">⚡ JEV 外挂</p>
+                  <h3 class="ai-confirm__title">已进入「{{ level.name }}」</h3>
+                  <p class="ai-confirm__desc">确认后由 Jev 接管本关，也可以先手动开玩</p>
+                  <button class="btn btn-ai is-on" @click="confirmAi">点击确认，开启 JEV 外挂</button>
+                </div>
+              </div>
+            </Transition>
+
             <Transition name="banner">
               <span v-if="toast" class="toast">{{ toast }}</span>
             </Transition>
@@ -259,6 +282,8 @@ const overlay = computed(() => {
 
         <!-- 右栏：玩法 -->
         <aside class="col">
+          <JevPanel :ai="ai" @toggle="toggleAi" @confirm="confirmAi" @save-key="saveApiKey" />
+
           <section class="panel glass">
             <h2 class="panel__title">玩法规则</h2>
             <ul class="rules">
@@ -323,6 +348,24 @@ const overlay = computed(() => {
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.btn-ai {
+  background: linear-gradient(135deg, rgba(255, 77, 141, 0.26), rgba(168, 85, 247, 0.22));
+  border-color: rgba(255, 77, 141, 0.42);
+  color: #ffd7e6;
+}
+
+.btn-ai:hover {
+  border-color: rgba(255, 77, 141, 0.7);
+  background: linear-gradient(135deg, rgba(255, 77, 141, 0.4), rgba(168, 85, 247, 0.32));
+}
+
+.btn-ai.is-on {
+  background: linear-gradient(135deg, #ffe259, #ff4d8d 55%, #a855f7);
+  border-color: transparent;
+  color: #1b0a13;
+  animation: pulseGlow 1.8s ease-out infinite;
 }
 
 .layout {
@@ -709,6 +752,56 @@ const overlay = computed(() => {
 .banner-leave-to {
   opacity: 0;
   transform: translateX(-50%) translateY(-10px) scale(0.9);
+}
+
+.ai-confirm {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: end center;
+  padding: 22px;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.ai-confirm__card {
+  pointer-events: auto;
+  text-align: center;
+  padding: 14px 20px 16px;
+  border-radius: var(--radius-lg);
+  background: rgba(12, 16, 32, 0.9);
+  border: 1px solid rgba(255, 77, 141, 0.45);
+  box-shadow: 0 22px 55px -22px rgba(0, 0, 0, 0.95), 0 0 30px -18px rgba(255, 77, 141, 0.9);
+  backdrop-filter: blur(10px);
+}
+
+.ai-confirm__flag {
+  display: inline-flex;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #1b0a13;
+  background: linear-gradient(100deg, #ffe259, #ff4d8d);
+  box-shadow: 0 8px 22px -10px rgba(255, 77, 141, 0.95);
+}
+
+.ai-confirm__title {
+  margin-top: 10px;
+  font-size: 18px;
+}
+
+.ai-confirm__desc {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.ai-confirm__card .btn {
+  margin-top: 12px;
+  padding: 10px 22px;
+  font-size: 13.5px;
 }
 
 .overlay {
