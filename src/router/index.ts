@@ -41,6 +41,21 @@ export const GAME_ROUTES: RouteRecordRaw[] = [
       tag: '益智',
     },
   },
+  {
+    path: '/tools/gf-translator',
+    name: 'gf-translator',
+    component: () => import('@/games/gf-translator/GfTranslatorView.vue'),
+    meta: {
+      title: '女友翻译器',
+      subtitle: '聊天模拟 · 情绪 / 生气指数 / 潜台词识别，JEV 替你回复',
+      emoji: '💬',
+      accent: '#ff4d8d',
+      accent2: '#7c5cff',
+      tag: 'AI 工具',
+      hideStats: true,
+      ctaLabel: '来试试',
+    },
+  },
 ]
 
 const routes: RouteRecordRaw[] = [

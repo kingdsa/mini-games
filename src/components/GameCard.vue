@@ -3,16 +3,21 @@ import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useScoreStore } from '@/stores/scores'
 
-const props = defineProps<{
-  path: string
-  title: string
-  subtitle: string
-  emoji: string
-  tag: string
-  accent: string
-  accent2: string
-  id: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    path: string
+    title: string
+    subtitle: string
+    emoji: string
+    tag: string
+    accent: string
+    accent2: string
+    id: string
+    hideStats?: boolean
+    ctaLabel?: string
+  }>(),
+  { hideStats: false, ctaLabel: '开始挑战' },
+)
 
 const store = useScoreStore()
 const best = computed(() => store.best(props.id))
@@ -39,7 +44,7 @@ const bestLabel = computed(() =>
     <h3 class="card__title">{{ title }}</h3>
     <p class="card__sub">{{ subtitle }}</p>
 
-    <dl class="card__stats">
+    <dl v-if="!hideStats" class="card__stats">
       <div>
         <dt>最高分</dt>
         <dd>{{ bestLabel }}</dd>
@@ -51,7 +56,7 @@ const bestLabel = computed(() =>
     </dl>
 
     <span class="card__cta">
-      开始挑战
+      {{ ctaLabel }}
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
         <path d="M5 12h13M13 6l6 6-6 6" />
       </svg>
