@@ -45,13 +45,14 @@ const features = [
       <div class="hero__actions fade-up" style="animation-delay: 0.18s">
         <RouterLink to="/games/tetris" class="btn btn-primary">🧱 玩俄罗斯方块</RouterLink>
         <RouterLink to="/games/match3" class="btn btn-ghost">🍬 玩开心消消乐</RouterLink>
+        <RouterLink to="/games/2048" class="btn btn-ghost">🔢 玩 2048</RouterLink>
       </div>
     </section>
 
     <section class="container">
       <div class="section-head">
         <h2>选择游戏</h2>
-        <p>两个完整的游戏，四种操作方式</p>
+        <p>三个完整的游戏，多种操作方式</p>
       </div>
 
       <div class="grid">

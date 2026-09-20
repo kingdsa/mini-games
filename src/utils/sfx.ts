@@ -161,6 +161,18 @@ class SoundEngine {
     this.tone({ freq: 520, to: 700, dur: 0.07, type: 'sine', gain: 0.22 })
   }
 
+  slide(): void {
+    this.tone({ freq: 320, to: 460, dur: 0.06, type: 'sine', gain: 0.16 })
+  }
+
+  /** level 为合并后方块的对数（log2(value)），值越大音调越高 */
+  merge(level: number): void {
+    const scale = [392, 523.25, 659.25, 783.99, 987.77, 1174.66]
+    const note = scale[Math.min(Math.max(Math.round(level) - 1, 0), scale.length - 1)]
+    this.tone({ freq: note, dur: 0.16, type: 'triangle', gain: 0.3 })
+    this.tone({ freq: note * 2, dur: 0.1, type: 'sine', gain: 0.12, delay: 0.02 })
+  }
+
   invalid(): void {
     this.tone({ freq: 200, to: 150, dur: 0.14, type: 'square', gain: 0.18 })
   }

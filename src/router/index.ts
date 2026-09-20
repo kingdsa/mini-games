@@ -28,6 +28,19 @@ export const GAME_ROUTES: RouteRecordRaw[] = [
       tag: '休闲',
     },
   },
+  {
+    path: '/games/2048',
+    name: '2048',
+    component: () => import('@/games/game2048/Game2048View.vue'),
+    meta: {
+      title: '2048',
+      subtitle: '数字合并 · 滑动方块 / 冲击 2048 / JEV AI 实时指导',
+      emoji: '🔢',
+      accent: '#fbbf24',
+      accent2: '#f97316',
+      tag: '益智',
+    },
+  },
 ]
 
 const routes: RouteRecordRaw[] = [
